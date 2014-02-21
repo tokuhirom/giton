@@ -1,0 +1,197 @@
+#!/usr/bin/env perl
+use strict;
+use warnings;
+use Pod::Usage;
+use Getopt::Long;
+
+&main; exit;
+
+{
+    package Giton;
+    use JSON::PP;
+
+    sub new {
+        my $class = shift;
+        my %args = @_;
+
+        my $self = bless {
+            giton_file => 'giton.json',
+            local      => 'local',
+            %args,
+        }, $class;
+        $self->{installed_file} ||= "$self->{local}/.giton.installed.json";
+        return $self;
+    }
+
+    sub config {
+        my $self = shift;
+        $self->{config} ||= $self->_build_config;
+        return $self->{config};
+    }
+
+    sub _build_config {
+        my $self = shift;
+        my $fname = $self->{giton_file} or die;
+        open my $fh, '<', $fname
+            or die "Cannot open file '$fname' for reading: $!";
+        my $json = do { local $/; <$fh> };
+        my $dat = JSON::PP::decode_json($json);
+        return $dat;
+    }
+
+    sub installed {
+        my $self = shift;
+        unless (exists $self->{installed}) {
+            $self->{installed} = $self->_build_installed;
+        }
+        return $self->{installed};
+    }
+
+    sub _build_installed {
+        my $self = shift;
+
+        my $fname = $self->{installed_file};
+        return +{} unless -f $fname;
+
+        open my $fh, '<', $fname
+            or die "Cannot open '$fname' for reading: $!";
+        my $json = do { local $/; <$fh> };
+        my $dat = eval { JSON::PP::decode_json($json) };
+        if ($@) {
+            die "Cannot parse JSON: $fname, $@";
+        }
+        return $dat;
+    }
+
+    sub save_installed {
+        my $self = shift;
+        my $fname = $self->{installed_file};
+
+        my $j = JSON::PP->new->pretty(1)->canonical(1);
+        my $json = $j->encode($self->installed);
+
+        open my $fh, '>', $fname
+            or die "Cannot open '$fname' for writing: $!";
+        print {$fh} $json;
+        close $fh;
+    }
+
+    sub install {
+        my $self = shift;
+
+        for my $target (@{$self->config->{dependencies}}) {
+            my $repository = $target->{repository} or die;
+            my $ref = $target->{ref} or die;
+
+            my $current = $self->installed->{$repository};
+            if ($current && $current eq $ref && !$self->{force}) {
+                # do nothing.
+                print STDOUT "[giton] ${repository}\@${ref} is installed.\n";
+            } else {
+                my $cmd = "cpanm --notest --no-man-pages -L '$self->{local}' ${repository}\@${ref}";
+                print STDOUT "[giton] $cmd\n";
+                system($cmd)
+                    == 0 or exit 1;
+                $self->installed->{$repository} = $ref;
+                $self->save_installed;
+            }
+        }
+    }
+
+    sub check {
+        my $self = shift;
+
+        my $fail = 0;
+        for my $target (@{$self->config->{dependencies}}) {
+            my $repository = $target->{repository} or die;
+            my $ref = $target->{ref} or die;
+
+            my $current = $self->installed->{$repository};
+            if ($current && $current eq $ref) {
+                print STDOUT "[giton] ${repository}\@${ref} is installed.\n";
+            } else {
+                print STDOUT "[giton] ${repository}\@${ref} is missing.\n";
+                $fail++;
+            }
+        }
+        exit $fail;
+    }
+
+    package Giton::CLI;
+    use Pod::Usage;
+
+    sub new { bless {}, shift }
+    sub run {
+        my ($self, @args) = @_;
+
+        my $cmd = shift(@args) || pod2usage;
+
+        if ($cmd eq 'install') {
+            $self->CMD_install(\@args);
+        } elsif ($cmd eq 'check') {
+            $self->CMD_check(\@args);
+        } else {
+            pod2usage;
+        }
+    }
+
+    sub CMD_install {
+        my ($self, $args) = @_;
+
+        my %args;
+
+        my $p = Getopt::Long::Parser->new( config => [ "no_ignore_case" ], );
+        $p->getoptionsfromarray(
+            $args,
+            "f|force!"  => sub { $args{force}++ },
+            "l|local=s" => sub { $args{local} = $_[1] },
+        );
+
+        my $giton = Giton->new(%args);
+        $giton->install;
+    }
+
+    sub CMD_check {
+        my ($self, $args)= @_;
+
+        my $giton = Giton->new();
+        $giton->check;
+    }
+}
+
+sub main {
+    my $cli = Giton::CLI->new();
+    $cli->run(@ARGV);
+}
+
+__END__
+
+=head1 SYNOPSIS
+
+    > giton install
+    Install modules.
+
+    > giton check
+    Checking, modules are installed.
+
+=head1 Format of giton.json
+
+
+    {
+        "dependencies":[
+            {
+                "repository":"git@github.com/tokuhirom/JKML.git',
+                "ref":"0.01",
+            },
+        ]
+    }
+
+giton.json をよんで、local/ にインストールする。
+
+local/.giton.installed.json に、インストールしたもののリストが記録される。
+
+`giton check` で、指定されてるものがすべてはいってるかチェックできる。
+
+    > giton install --local local/
+
+のようにして、パスを指定可能。
